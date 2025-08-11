@@ -1,3 +1,4 @@
-archivebox>=0.7.2
-click>=8.2.2
-PyYAML>=6.0.2
+archivebox>=0.7.0
+click>=8.0.0
+pyyaml>=6.0
+pathlib>=1.0.1

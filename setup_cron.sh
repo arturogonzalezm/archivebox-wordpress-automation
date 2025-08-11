@@ -15,7 +15,7 @@ LOG_DIR="$SCRIPT_DIR/logs"
 mkdir -p "$ARCHIVEBOX_DIR"
 mkdir -p "$LOG_DIR"
 
-# --- Install system dependencies: Node.js & npm if missing ---
+# --- Install system dependencies: Node.js, npm, wget if missing ---
 echo "Checking for Node.js and npm..."
 if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
   echo "Node.js or npm not found. Attempting to install via package manager..."
@@ -26,6 +26,22 @@ if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     sudo yum install -y nodejs npm
   else
     echo "Please install Node.js and npm manually. Exiting."
+    exit 1
+  fi
+fi
+
+# Check for wget and install if missing
+echo "Checking for wget..."
+if ! command -v wget >/dev/null 2>&1; then
+  echo "wget not found. Attempting to install via package manager..."
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get install -y wget
+  elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y wget
+  elif command -v brew >/dev/null 2>&1; then
+    brew install wget
+  else
+    echo "Please install wget manually. It is required for ArchiveBox to function properly."
     exit 1
   fi
 fi
