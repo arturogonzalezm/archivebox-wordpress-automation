@@ -7,11 +7,51 @@ from pathlib import Path
 
 import click
 import yaml
+import traceback
 
 # Default Configuration
 DEFAULT_ARCHIVEBOX_DIR = os.path.join(os.getcwd(), 'srv', 'archivebox')
 DEFAULT_CONFIG_FILE = 'sites_config.yaml'
 PORT = 8001
+
+
+def _log_error(message: str, ctx=None, include_traceback: bool = False) -> None:
+    """Append an error line with timestamp to project logs and data-dir logs.
+
+    - Writes to ./logs/errors.log (project root)
+    - Writes to <ARCHIVEBOX_DIR>/logs/errors.log if ctx available
+    """
+    try:
+        timestamp = datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
+        line = f"[{timestamp}] {message}\n"
+
+        # Project root logs/errors.log
+        base_dir = Path(__file__).resolve().parent
+        proj_logs = base_dir / 'logs'
+        proj_logs.mkdir(parents=True, exist_ok=True)
+        with open(proj_logs / 'errors.log', 'a', encoding='utf-8') as f:
+            f.write(line)
+            if include_traceback:
+                f.write(traceback.format_exc())
+                if not line.endswith('\n'):
+                    f.write('\n')
+
+        # Data-dir logs/errors.log
+        if ctx and isinstance(ctx.obj, dict) and ctx.obj.get('ARCHIVEBOX_DIR'):
+            data_logs_dir = Path(ctx.obj['ARCHIVEBOX_DIR']) / 'logs'
+            data_logs_dir.mkdir(parents=True, exist_ok=True)
+            with open(data_logs_dir / 'errors.log', 'a', encoding='utf-8') as f:
+                f.write(line)
+                if include_traceback:
+                    f.write(traceback.format_exc())
+                    if not line.endswith('\n'):
+                        f.write('\n')
+    except Exception:
+        # As a last resort, print to stderr with timestamp
+        try:
+            print(f"[ERROR LOGGING FAILURE {datetime.datetime.now().isoformat(sep=' ', timespec='seconds')}] {message}", file=sys.stderr)
+        except Exception:
+            pass
 
 
 @click.group()
@@ -269,7 +309,9 @@ def _run(ctx, *args, stdin=None, capture_output=False):
     # since we didn't capture the output
     if not capture_output:
         if result.returncode != 0:
-            click.echo(f"[!] Command failed (exit {result.returncode}): {' '.join(cmd)}")
+            msg = f"Command failed (exit {result.returncode}): {' '.join(cmd)}"
+            click.echo(f"[!] {msg}")
+            _log_error(msg, ctx=ctx)
 
         # Create a minimal result object with stdout/stderr
         class MinimalResult:
@@ -283,9 +325,13 @@ def _run(ctx, *args, stdin=None, capture_output=False):
 
     # For captured output, handle as before
     if result.returncode != 0:
-        click.echo(f"[!] Command failed (exit {result.returncode}): {' '.join(cmd)}")
+        msg = f"Command failed (exit {result.returncode}): {' '.join(cmd)}"
+        click.echo(f"[!] {msg}")
         if result.stderr:
             click.echo(result.stderr.strip())
+            _log_error(f"{msg} | stderr: {result.stderr.strip()}", ctx=ctx)
+        else:
+            _log_error(msg, ctx=ctx)
 
     # If we have a removed flags message, prepend it to stdout
     if 'REMOVED_FLAGS_MESSAGE' in ctx.obj:
@@ -544,6 +590,7 @@ def schedule(ctx, notify, check_changes, cleanup):
         except Exception as e:
             err = str(e)
             log.write(f"[{datetime.datetime.now()}] Error: {err}\n")
+            _log_error(f"Scheduled run error: {err}", ctx=ctx, include_traceback=True)
             if notify:
                 _send_notification(err, False, ctx)
             raise
@@ -589,6 +636,7 @@ def cleanup(ctx, days, keep_monthly, dry_run):
     result = _run(ctx, 'list', '--json', capture_output=True)
     if result.returncode != 0:
         click.echo("Failed to get snapshot list")
+        _log_error("Cleanup failed to get snapshot list (archivebox list --json)", ctx=ctx)
         return
 
     try:
@@ -644,8 +692,10 @@ def cleanup(ctx, days, keep_monthly, dry_run):
 
     except json.JSONDecodeError:
         click.echo("Failed to parse snapshot list")
+        _log_error("Cleanup failed to parse snapshot list JSON", ctx=ctx, include_traceback=True)
     except Exception as e:
         click.echo(f"Error during cleanup: {str(e)}")
+        _log_error(f"Cleanup error: {str(e)}", ctx=ctx, include_traceback=True)
 
 
 @cli.command()
@@ -740,6 +790,7 @@ def _send_notification(message, success=True, ctx=None):
 
         except Exception as e:
             click.echo(f"Failed to send email notification: {str(e)}")
+            _log_error(f"Notification email send failed: {str(e)}", ctx=ctx, include_traceback=True)
 
     # Slack notifications
     if 'slack' in notif_config and notif_config['slack'].get('webhook_url'):
@@ -773,6 +824,7 @@ def _send_notification(message, success=True, ctx=None):
 
         except Exception as e:
             click.echo(f"Failed to send Slack notification: {str(e)}")
+            _log_error(f"Slack notification send failed: {str(e)}", ctx=ctx, include_traceback=True)
 
 
 @cli.command()
