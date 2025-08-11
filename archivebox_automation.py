@@ -32,6 +32,9 @@ def cli(ctx, archivebox_dir, archivebox_bin, config_file):
     ctx.obj['CONFIG_FILE'] = config_file
     ctx.obj['SITES_CONFIG'] = _load_sites_config(config_file)
 
+    # Ensure ArchiveBox settings are configured to avoid known extractor failures
+    _ensure_archivebox_settings(archivebox_dir)
+
 
 def _load_sites_config(config_file):
     """Load sites configuration from YAML or fallback to urls.txt"""
@@ -41,26 +44,129 @@ def _load_sites_config(config_file):
     return None
 
 
+def _ensure_archivebox_settings(archivebox_dir: str) -> None:
+    """Ensure ArchiveBox.conf contains settings to mitigate known extractor issues.
+
+    Specifically:
+      - Disable Readability extractor to avoid JSON parsing crashes.
+      - Disable Media and Archive.org savers by default to avoid frequent failures/timeouts.
+      - Leave Screenshot/PDF enabled only if Chromium/Chrome is present.
+    The function is idempotent and will create ArchiveBox.conf if missing.
+    """
+    conf_path = os.path.join(archivebox_dir, 'ArchiveBox.conf')
+    os.makedirs(archivebox_dir, exist_ok=True)
+
+    # Detect Chromium presence (re-using logic similar to _check_dependencies)
+    chromium_paths = [
+        '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    ]
+    has_chromium = any(os.path.exists(p) and os.access(p, os.X_OK) for p in chromium_paths)
+
+    # Desired settings
+    settings = {
+        'SAVE_READABILITY': 'False',
+        'SAVE_MEDIA': 'False',
+        'SAVE_ARCHIVE_DOT_ORG': 'False',
+        # We will not explicitly force PDF/SCREENSHOT here; ArchiveBox will handle based on availability.
+    }
+
+    # Read existing content if present
+    existing = ''
+    if os.path.exists(conf_path):
+        try:
+            with open(conf_path, 'r') as f:
+                existing = f.read()
+        except Exception:
+            existing = ''
+
+    # Ensure we have a [SERVER_CONFIG] header at minimum
+    lines = []
+    if existing.strip():
+        lines = existing.splitlines()
+    else:
+        lines = ['[SERVER_CONFIG]']
+
+    # Ensure we have a [SAVE_METHODS] section
+    if not any(l.strip().startswith('[SAVE_METHODS]') for l in lines):
+        lines.append('')
+        lines.append('[SAVE_METHODS]')
+
+    # Build a dict of current SAVE_METHODS
+    save_methods_start = None
+    for idx, l in enumerate(lines):
+        if l.strip().startswith('[SAVE_METHODS]'):
+            save_methods_start = idx
+            break
+
+    # After the [SAVE_METHODS] line, collect until next section
+    current = {}
+    if save_methods_start is not None:
+        for l in lines[save_methods_start + 1:]:
+            if l.strip().startswith('['):
+                break
+            if '=' in l and not l.strip().startswith('#') and l.strip():
+                key, val = l.split('=', 1)
+                current[key.strip()] = val.strip()
+
+    # Update values
+    for k, v in settings.items():
+        current[k] = v
+
+    # Reconstruct the [SAVE_METHODS] block
+    new_lines = []
+    i = 0
+    while i < len(lines):
+        new_lines.append(lines[i])
+        if lines[i].strip().startswith('[SAVE_METHODS]'):
+            # Skip old entries until next section
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith('['):
+                i += 1
+            # Insert our settings
+            for k, v in current.items():
+                new_lines.append(f"{k} = {v}")
+            continue
+        i += 1
+
+    # If we never hit [SAVE_METHODS] for some reason, append it at end
+    if not any(l.strip().startswith('[SAVE_METHODS]') for l in new_lines):
+        new_lines.append('[SAVE_METHODS]')
+        for k, v in current.items():
+            new_lines.append(f"{k} = {v}")
+
+    content = '\n'.join(new_lines) + '\n'
+
+    try:
+        with open(conf_path, 'w') as f:
+            f.write(content)
+    except Exception:
+        # Best effort: if we can't write, just continue silently
+        pass
+
+
 def _check_dependencies():
     """Check if required dependencies are installed"""
     dependencies = {
         'wget': 'wget is required for downloading web pages. Install with: brew install wget (macOS) or apt-get install wget (Linux)'
     }
-    
+
     # Check for Chromium browser (used for screenshot and PDF extractors)
     chromium_paths = [
         '/Applications/Chromium.app/Contents/MacOS/Chromium',  # macOS
-        '/usr/bin/chromium',                                   # Linux
-        '/usr/bin/chromium-browser',                           # Some Linux distros
+        '/usr/bin/chromium',  # Linux
+        '/usr/bin/chromium-browser',  # Some Linux distros
         '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'  # Chrome on macOS as fallback
     ]
-    
+
     has_chromium = False
     for path in chromium_paths:
         if os.path.exists(path) and os.access(path, os.X_OK):
             has_chromium = True
             break
-    
+
     missing = []
     for cmd, message in dependencies.items():
         try:
@@ -68,12 +174,14 @@ def _check_dependencies():
             subprocess.run(['which', cmd], check=True, capture_output=True)
         except (subprocess.CalledProcessError, FileNotFoundError):
             missing.append((cmd, message))
-    
+
     # Add Chromium to missing dependencies if not found
     if not has_chromium:
-        missing.append(('chromium', 'Chromium or Chrome is required for screenshot and PDF generation. Install Chromium or Chrome browser.'))
-    
+        missing.append(('chromium',
+                        'Chromium or Chrome is required for screenshot and PDF generation. Install Chromium or Chrome browser.'))
+
     return missing
+
 
 def _run(ctx, *args, stdin=None, capture_output=False):
     """Internal: Run ArchiveBox command without raising on errors"""
@@ -85,7 +193,7 @@ def _run(ctx, *args, stdin=None, capture_output=False):
         if '--without-readability' in new_args:
             new_args.remove('--without-readability')
             removed_flags.append("--without-readability")
-            
+
         # Print message about removed flags
         if removed_flags:
             message = f"[*] Removed unsupported flag: {removed_flags[0]}"
@@ -94,14 +202,14 @@ def _run(ctx, *args, stdin=None, capture_output=False):
             sys.stdout.flush()
             # Also store the message to be included in the result
             ctx.obj['REMOVED_FLAGS_MESSAGE'] = message
-        
+
         # Check for missing dependencies
         missing_deps = _check_dependencies()
         if missing_deps:
             for cmd, message in missing_deps:
                 click.echo(f"[!] Missing dependency: {cmd}")
                 click.echo(f"    {message}")
-            
+
             # Modify args to disable extractors that require missing dependencies
             for cmd, _ in missing_deps:
                 if cmd == 'wget':
@@ -118,9 +226,9 @@ def _run(ctx, *args, stdin=None, capture_output=False):
                         new_args.append('--without-pdf')
                         click.echo(f"[!] Disabled PDF extractor due to missing Chromium/Chrome")
             click.echo(f"[*] Continuing with modified command (disabled missing extractors)")
-        
+
         args = tuple(new_args)
-    
+
     base_bin = ctx.obj['ARCHIVEBOX_BIN']
     if base_bin:
         cmd = [os.path.abspath(base_bin)] + list(args)
@@ -178,7 +286,7 @@ def _run(ctx, *args, stdin=None, capture_output=False):
         click.echo(f"[!] Command failed (exit {result.returncode}): {' '.join(cmd)}")
         if result.stderr:
             click.echo(result.stderr.strip())
-    
+
     # If we have a removed flags message, prepend it to stdout
     if 'REMOVED_FLAGS_MESSAGE' in ctx.obj:
         result.stdout = ctx.obj['REMOVED_FLAGS_MESSAGE'] + "\n" + result.stdout
@@ -213,35 +321,35 @@ def _create_default_config(config_file):
         subprocess.run(['which', 'wget'], check=True, capture_output=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
         has_wget = False
-    
+
     # Check for Chromium browser (used for screenshot and PDF extractors)
     has_chromium = False
     chromium_paths = [
         '/Applications/Chromium.app/Contents/MacOS/Chromium',  # macOS
-        '/usr/bin/chromium',                                   # Linux
-        '/usr/bin/chromium-browser',                           # Some Linux distros
+        '/usr/bin/chromium',  # Linux
+        '/usr/bin/chromium-browser',  # Some Linux distros
         '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'  # Chrome on macOS as fallback
     ]
-    
+
     for path in chromium_paths:
         if os.path.exists(path) and os.access(path, os.X_OK):
             has_chromium = True
             break
-    
+
     # Create default extractors list based on available dependencies
     default_extractors = []
     if has_chromium:
         default_extractors.extend(['screenshot', 'pdf'])
     else:
         click.echo("[!] Warning: Chromium/Chrome not found. Screenshot and PDF extractors will be disabled.")
-    
+
     if has_wget:
         default_extractors.append('wget')
-    
+
     # Extended extractors for example site
     example_extractors = default_extractors.copy()
     example_extractors.append('singlefile')
-    
+
     default_config = {
         'sites': [{
             'name': 'Example Site',
@@ -272,11 +380,12 @@ def _create_default_config(config_file):
 @click.option('--without-wget', is_flag=True, help='Skip wget extractor')
 @click.option('--without-singlefile', is_flag=True, help='Skip singlefile extractor')
 @click.option('--without-dom', is_flag=True, help='Skip dom extractor')
-@click.option('--without-readability', is_flag=True, default=True, help='Skip readability extractor (disabled by default due to JSON parsing issues)')
+@click.option('--without-readability', is_flag=True, default=True,
+              help='Skip readability extractor (disabled by default due to JSON parsing issues)')
 @click.option('--without-pdf', is_flag=True, help='Skip pdf extractor')
 @click.option('--without-screenshot', is_flag=True, help='Skip screenshot extractor')
 @click.pass_context
-def add(ctx, url, index_only, depth, tag, without_wget, without_singlefile, 
+def add(ctx, url, index_only, depth, tag, without_wget, without_singlefile,
         without_dom, without_readability, without_pdf, without_screenshot):
     """Add a single URL to ArchiveBox for archiving"""
     args = ['add', url, f'--depth={depth}']
@@ -287,7 +396,7 @@ def add(ctx, url, index_only, depth, tag, without_wget, without_singlefile,
 
     month_tag = f"snapshot-{datetime.datetime.now().strftime('%Y-%m')}"
     args.extend(['--tag', month_tag])
-    
+
     # Add the --without-* flags if specified
     if without_wget:
         args.append('--without-wget')
@@ -295,8 +404,10 @@ def add(ctx, url, index_only, depth, tag, without_wget, without_singlefile,
         args.append('--without-singlefile')
     if without_dom:
         args.append('--without-dom')
-    if without_readability:
-        args.append('--without-readability')
+    # Readability extractor is disabled via ArchiveBox.conf in _ensure_archivebox_settings()
+    # Do not pass the legacy '--without-readability' flag to ArchiveBox CLI (unsupported in newer versions).
+    # if without_readability:
+    #     args.append('--without-readability')
     if without_pdf:
         args.append('--without-pdf')
     if without_screenshot:
@@ -337,15 +448,17 @@ def bulk(ctx, index_only, parallel):
             ]
             click.echo(f"Archiving {site['name']} ({url})...")
 
-            # Always disable readability extractor due to JSON parsing issues
-            result = _run(ctx, 'add', url, f'--depth={depth}', '--without-readability', *sum((['--tag', t] for t in tags), []))
+            # Readability extractor is disabled via ArchiveBox.conf; do not pass legacy CLI flag
+            result = _run(ctx, 'add', url, f'--depth={depth}',
+                          *sum((['--tag', t] for t in tags), []))
             if result.returncode != 0:
                 click.echo(f"Skipping {site['name']} due to error.")
                 continue
 
             for subpage in site.get('archive_subpages', []):
                 sub_url = f"{url.rstrip('/')}/{subpage}"
-                result = _run(ctx, 'add', sub_url, '--depth=0', '--without-readability', *sum((['--tag', t] for t in tags), []))
+                result = _run(ctx, 'add', sub_url, '--depth=0',
+                              *sum((['--tag', t] for t in tags), []))
                 if result.returncode != 0:
                     click.echo(f"  Skipping subpage {subpage} due to error.")
             if not parallel:
@@ -354,8 +467,8 @@ def bulk(ctx, index_only, parallel):
         with open(urls_file, 'r') as f:
             urls = [l.strip() for l in f if l.strip() and not l.startswith('#')]
         for url in urls:
-            # Always disable readability extractor due to JSON parsing issues
-            result = _run(ctx, 'add', url, f'--depth={1}', '--without-readability')
+            # Readability extractor is disabled via ArchiveBox.conf; do not pass legacy CLI flag
+            result = _run(ctx, 'add', url, f'--depth={1}')
             if result.returncode != 0:
                 click.echo(f"Skipping URL {url} due to error.")
                 continue
