@@ -19,6 +19,56 @@ This tool automates the process of archiving WordPress websites using ArchiveBox
 - `setup_cron.sh`: Setup script for dependencies and scheduling
 - `srv/archivebox/`: Directory for ArchiveBox data
 
+## Quickstart (How to run)
+
+Follow these steps to get up and running quickly:
+
+1. Install prerequisites
+   - Python 3.10+ (tested with 3.11)
+   - pip
+   - wget (for downloading pages)
+   - Node.js + npm (for SingleFile extractor)
+   - Chromium or Google Chrome (enables screenshot/PDF extractors)
+
+   macOS (Homebrew):
+   - brew install wget node
+   - Install Chromium or ensure Google Chrome is installed
+
+   Debian/Ubuntu:
+   - sudo apt-get update && sudo apt-get install -y wget nodejs npm chromium-browser
+
+2. Clone or open this repo and create a virtual environment
+   - python3 -m venv .venv
+   - source .venv/bin/activate    # Windows: .venv\\Scripts\\activate
+
+3. Install Python dependencies
+   - pip install -r requirements.txt
+
+4. Initialize the data directory and example config
+   - python3.11 archivebox_automation.py init
+
+5. Configure your sites (optional)
+   - Edit sites_config.yaml (add sites, set archive.per_site, tags, etc.)
+
+6. Run a bulk archive
+   - python3.11 archivebox_automation.py bulk
+   - For per-site instances: python3.11 archivebox_automation.py bulk --per-site
+
+7. Start the web UI
+   - python3.11 archivebox_automation.py server --port 8001
+   - Open http://localhost:8001
+
+8. Create a superuser for the web interface (optional)
+   - cd srv/archivebox
+   - archivebox manage createsuperuser
+
+9. Schedule monthly runs (optional)
+   - chmod +x setup_cron.sh && ./setup_cron.sh
+
+Tips
+- If Chromium/Chrome is not found, screenshot and PDF extractors are disabled automatically.
+- You can run a quick syntax check: python3.11 -m py_compile archivebox_automation.py
+
 ## Usage
 
 ### Per-website snapshots (separate instances)
@@ -30,7 +80,7 @@ Ways to enable per-site archiving:
   python3.11 archivebox_automation.py bulk --per-site
 - Config: set archive.per_site: true in sites_config.yaml and run bulk normally
 
-Per-site data directories are created under your data-dir (default srv/archivebox) using a slugified site name, e.g. srv/archivebox/example-site/.
+Per-site data directories are created under your data-dir (default srv/archivebox) using a slugified site name, e.g. srv/archivebox/example-site/. You can override the slug per site via the `slug` key in sites_config.yaml.
 
 You can also target a single per-site instance when serving or generating links:
 - Serve a specific site instance:
@@ -66,6 +116,17 @@ chmod +x setup_cron.sh
 ./setup_cron.sh
 ```
 
+### Classification of snapshots per website
+
+Each snapshot is tagged automatically to make it easy to classify and filter per website:
+- site-slug — a plain tag with the site’s slug (based on the website name, e.g., burgis-de)
+- site:<name> — the human-friendly site name
+- site_slug:<slug> — a slug composed of the website name plus a timestamp (auto-generated at run time), e.g., my-site-20250812132900
+- client:<client> — the client name if provided
+- snapshot-YYYY-MM — the monthly snapshot marker
+
+You can also add custom tags per site by adding a `tags:` list in sites_config.yaml.
+
 ### Commands
 
 ```bash
@@ -79,8 +140,11 @@ python3.11 archivebox_automation.py add https://example.com
 python3.11 archivebox_automation.py bulk
 
 python3.11 archivebox_automation.py bulk --parallel
+# --parallel skips the short pause between sites (faster), but does not run true concurrent processes.
 
 python3.11 archivebox_automation.py status
+
+python3.11 -m py_compile archivebox_automation.py
 
 # Run scheduled archiving (with cleanup)
 python3.11 archivebox_automation.py schedule

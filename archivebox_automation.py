@@ -86,6 +86,18 @@ def _slugify(name: str) -> str:
     return s or 'site'
 
 
+def _slug_with_timestamp(name: str, when: Optional[datetime.datetime] = None) -> str:
+    """Create a slug based on a name plus a timestamp (YYYYMMDDHHMMSS).
+
+    Used for tagging snapshots so that the slug reflects the website name and capture time
+    without impacting stable directory names.
+    """
+    when = when or datetime.datetime.now()
+    ts = when.strftime('%Y%m%d%H%M%S')
+    base = _slugify(name)
+    return f"{base}-{ts}" if base else ts
+
+
 def _load_sites_config(config_file):
     """Load sites configuration from YAML or fallback to urls.txt"""
     if os.path.exists(config_file):
@@ -559,7 +571,7 @@ def add(ctx, url, index_only, depth, tag, without_wget,
 
 @cli.command()
 @click.option('--index-only/--no-index-only', 'index_only', default=False)
-@click.option('--parallel/--sequential', default=False)
+@click.option('--parallel/--sequential', default=False, help='Skip pauses between sites (faster), but does not run true concurrent processes')
 @click.option('--per-site/--combined', default=None, help='Archive into separate per-site instances (or use archive.per_site from config)')
 @click.pass_context
 def bulk(ctx, index_only, parallel, per_site):
@@ -590,13 +602,17 @@ def bulk(ctx, index_only, parallel, per_site):
             url = site['url']
             name = site.get('name', url)
             depth = site.get('depth', defaults.get('depth', 1))
-            # Determine slug (allow override from config)
-            site_slug = site.get('slug') or _slugify(name)
+            # Determine stable slug for directory (allow override from config)
+            stable_site_slug = site.get('slug') or _slugify(name)
+            # Compute timestamped slug for tagging purposes
+            timestamped_slug = _slug_with_timestamp(name)
             # Build tags, allow extra custom tags from config
+            # Include a plain, name-based tag (stable slug) for easy filtering in ArchiveBox UI
             tags = [
+                stable_site_slug,
                 f"client:{site.get('client', 'unknown')}",
                 f"site:{name}",
-                f"site_slug:{site_slug}",
+                f"site_slug:{timestamped_slug}",
                 f"snapshot-{datetime.datetime.now().strftime('%Y-%m')}"
             ]
             extra_tags = site.get('tags') or []
@@ -608,7 +624,7 @@ def bulk(ctx, index_only, parallel, per_site):
             saved_dir = ctx.obj['ARCHIVEBOX_DIR']
             saved_urls = ctx.obj['URLS_FILE']
             if effective_per_site:
-                site_dir = _ensure_site_instance(ctx, name, site_slug)
+                site_dir = _ensure_site_instance(ctx, name, stable_site_slug)
                 ctx.obj['ARCHIVEBOX_DIR'] = site_dir
                 ctx.obj['URLS_FILE'] = os.path.join(site_dir, 'urls.txt')
                 click.echo(f"[per-site] Using data-dir: {site_dir}")
