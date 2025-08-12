@@ -10,6 +10,7 @@ import yaml
 import traceback
 import json
 from typing import List, Dict, Optional, Tuple
+import re
 
 # Default Configuration
 DEFAULT_ARCHIVEBOX_DIR = os.path.join(os.getcwd(), 'srv', 'archivebox')
@@ -76,6 +77,13 @@ def cli(ctx, archivebox_dir, archivebox_bin, config_file):
 
     # Ensure ArchiveBox settings are configured to avoid known extractor failures
     _ensure_archivebox_settings(archivebox_dir)
+
+
+def _slugify(name: str) -> str:
+    s = name.strip().lower()
+    s = re.sub(r'[^a-z0-9]+', '-', s)
+    s = re.sub(r'-+', '-', s).strip('-')
+    return s or 'site'
 
 
 def _load_sites_config(config_file):
@@ -422,6 +430,33 @@ def init(ctx):
     click.echo(f"Initialised ArchiveBox in {d}.")
 
 
+def _ensure_site_instance(ctx, site_name: str) -> str:
+    base = DEFAULT_ARCHIVEBOX_DIR
+    # If user specified a custom data-dir, nest site instances under it
+    if ctx and ctx.obj and ctx.obj.get('ARCHIVEBOX_DIR'):
+        base = ctx.obj['ARCHIVEBOX_DIR']
+    site_slug = _slugify(site_name)
+    site_dir = os.path.join(base, site_slug)
+    os.makedirs(site_dir, exist_ok=True)
+    # Create minimal init if missing (detect by presence of index) and ensure settings
+    _ensure_archivebox_settings(site_dir)
+    # We'll attempt a lightweight init if archive/index not present
+    idx = os.path.join(site_dir, 'index.sqlite3')
+    if not os.path.exists(idx):
+        # Temporarily switch cwd target by mutating ctx, run init, then keep it for caller
+        prev_dir = ctx.obj['ARCHIVEBOX_DIR']
+        prev_urls = ctx.obj['URLS_FILE']
+        ctx.obj['ARCHIVEBOX_DIR'] = site_dir
+        ctx.obj['URLS_FILE'] = os.path.join(site_dir, 'urls.txt')
+        try:
+            _run(ctx, 'init', '--force')
+        finally:
+            # Keep site_dir in ctx for caller usage; caller may restore later
+            ctx.obj['ARCHIVEBOX_DIR'] = site_dir
+            ctx.obj['URLS_FILE'] = os.path.join(site_dir, 'urls.txt')
+    return site_dir
+
+
 def _create_default_config(config_file):
     # Check if wget is available
     has_wget = True
@@ -525,8 +560,9 @@ def add(ctx, url, index_only, depth, tag, without_wget,
 @cli.command()
 @click.option('--index-only/--no-index-only', 'index_only', default=False)
 @click.option('--parallel/--sequential', default=False)
+@click.option('--per-site/--combined', default=None, help='Archive into separate per-site instances (or use archive.per_site from config)')
 @click.pass_context
-def bulk(ctx, index_only, parallel):
+def bulk(ctx, index_only, parallel, per_site):
     """Add all URLs from urls.txt or config file to ArchiveBox"""
     sites_config = ctx.obj['SITES_CONFIG']
     urls_file = ctx.obj['URLS_FILE']
@@ -541,23 +577,45 @@ def bulk(ctx, index_only, parallel):
     if has_yaml:
         sites = sites_config['sites']
         defaults = sites_config.get('defaults', {})
+        cfg_per_site = None
+        try:
+            cfg_per_site = sites_config.get('archive', {}).get('per_site', False)
+        except Exception:
+            cfg_per_site = False
+        effective_per_site = cfg_per_site if per_site is None else per_site
+
         for site in sites:
             if not site.get('monthly_snapshot', True):
                 continue
             url = site['url']
+            name = site.get('name', url)
             depth = site.get('depth', defaults.get('depth', 1))
             tags = [
                 f"client:{site.get('client', 'unknown')}",
-                f"site:{site.get('name', 'unknown')}",
+                f"site:{name}",
                 f"snapshot-{datetime.datetime.now().strftime('%Y-%m')}"
             ]
-            click.echo(f"Archiving {site['name']} ({url})...")
+
+            # Optionally switch to per-site instance
+            saved_dir = ctx.obj['ARCHIVEBOX_DIR']
+            saved_urls = ctx.obj['URLS_FILE']
+            if effective_per_site:
+                site_dir = _ensure_site_instance(ctx, name)
+                ctx.obj['ARCHIVEBOX_DIR'] = site_dir
+                ctx.obj['URLS_FILE'] = os.path.join(site_dir, 'urls.txt')
+                click.echo(f"[per-site] Using data-dir: {site_dir}")
+
+            click.echo(f"Archiving {name} ({url})...")
 
             # Readability extractor is disabled via ArchiveBox.conf; do not pass legacy CLI flag
             result = _run(ctx, 'add', url, f'--depth={depth}',
                           *sum((['--tag', t] for t in tags), []))
             if result.returncode != 0:
-                click.echo(f"Skipping {site['name']} due to error.")
+                click.echo(f"Skipping {name} due to error.")
+                # Restore context if we switched
+                if effective_per_site:
+                    ctx.obj['ARCHIVEBOX_DIR'] = saved_dir
+                    ctx.obj['URLS_FILE'] = saved_urls
                 continue
 
             for subpage in site.get('archive_subpages', []):
@@ -568,6 +626,11 @@ def bulk(ctx, index_only, parallel):
                     click.echo(f"  Skipping subpage {subpage} due to error.")
             if not parallel:
                 time.sleep(2)
+
+            # Restore context after each site
+            if effective_per_site:
+                ctx.obj['ARCHIVEBOX_DIR'] = saved_dir
+                ctx.obj['URLS_FILE'] = saved_urls
     else:
         with open(urls_file, 'r') as f:
             urls = [l.strip() for l in f if l.strip() and not l.startswith('#')]
@@ -738,8 +801,9 @@ def _find_nearest_snapshot(entries: List[Dict], url: str, target: datetime.datet
 @click.option('--months-ago', type=int, required=False, help='How many months ago from now')
 @click.option('--match', type=click.Choice(['exact', 'prefix']), default='exact', help='URL match mode')
 @click.option('--server-base', required=False, help='Base server URL, e.g. http://localhost:8001')
+@click.option('--site', 'site_name', required=False, help='Target a specific per-site instance by name')
 @click.pass_context
-def snapshot_link(ctx, url, date_str, months_ago, match, server_base):
+def snapshot_link(ctx, url, date_str, months_ago, match, server_base, site_name):
     """Print the best snapshot link for the URL around the given date.
 
     Examples:
@@ -747,6 +811,17 @@ def snapshot_link(ctx, url, date_str, months_ago, match, server_base):
       snapshot_link https://example.com --date 2025-06 --server-base http://archivebox:8001
     """
     target = _parse_target_date(date_str, months_ago)
+
+    # If a site is specified, temporarily switch to its data-dir
+    saved_dir = ctx.obj['ARCHIVEBOX_DIR']
+    saved_urls = ctx.obj['URLS_FILE']
+    if site_name:
+        site_dir = os.path.join(saved_dir, _slugify(site_name))
+        if not os.path.isdir(site_dir):
+            click.echo(f"Site instance not found: {site_name} -> {site_dir}")
+            return
+        ctx.obj['ARCHIVEBOX_DIR'] = site_dir
+        ctx.obj['URLS_FILE'] = os.path.join(site_dir, 'urls.txt')
 
     result = _run(ctx, 'list', '--json', capture_output=True)
     if result.returncode != 0 or not result.stdout:
@@ -796,6 +871,11 @@ def snapshot_link(ctx, url, date_str, months_ago, match, server_base):
     click.echo(f"Relative: {rel}")
     click.echo(f"File path: {idx_path}")
     click.echo(json.dumps(payload))
+
+    # Restore ctx if switched
+    if site_name:
+        ctx.obj['ARCHIVEBOX_DIR'] = saved_dir
+        ctx.obj['URLS_FILE'] = saved_urls
 
 
 @cli.command()
@@ -1021,8 +1101,19 @@ def _send_notification(message, success=True, ctx=None):
 @cli.command()
 @click.option('--port', default=PORT)
 @click.option('--host', default='0.0.0.0')
+@click.option('--site', 'site_name', required=False, help='Serve a specific per-site instance')
 @click.pass_context
-def server(ctx, port, host):
+def server(ctx, port, host, site_name):
+    # Optionally switch to a per-site instance
+    if site_name:
+        base = ctx.obj['ARCHIVEBOX_DIR']
+        site_dir = os.path.join(base, _slugify(site_name))
+        if not os.path.isdir(site_dir):
+            click.echo(f"Site instance not found: {site_name} -> {site_dir}")
+            return
+        ctx.obj['ARCHIVEBOX_DIR'] = site_dir
+        ctx.obj['URLS_FILE'] = os.path.join(site_dir, 'urls.txt')
+        click.echo(f"Serving site '{site_name}' from {site_dir}")
     click.echo(f"Starting server on http://localhost:{port}")
     _run(ctx, 'server', f'{host}:{port}')
 

@@ -4,7 +4,7 @@ A tool for archiving and recovering hundreds of WordPress websites using Archive
 
 ## Overview
 
-This tool automates the process of archiving WordPress websites using ArchiveBox. It provides:
+This tool automates the process of archiving WordPress websites using ArchiveBox. Its goal in this project is to capture website snapshots for viewing how sites looked in the past; backup/restore of live sites is out of scope and handled by a separate application. It provides:
 
 - Configuration-based site management
 - Scheduled monthly snapshots
@@ -20,6 +20,23 @@ This tool automates the process of archiving WordPress websites using ArchiveBox
 - `srv/archivebox/`: Directory for ArchiveBox data
 
 ## Usage
+
+### Per-website snapshots (separate instances)
+
+You can archive a snapshot per website into its own ArchiveBox instance. This keeps each site's archives isolated with their own index and UI.
+
+Ways to enable per-site archiving:
+- CLI: use the --per-site flag with bulk
+  python3.11 archivebox_automation.py bulk --per-site
+- Config: set archive.per_site: true in sites_config.yaml and run bulk normally
+
+Per-site data directories are created under your data-dir (default srv/archivebox) using a slugified site name, e.g. srv/archivebox/example-site/.
+
+You can also target a single per-site instance when serving or generating links:
+- Serve a specific site instance:
+  python3.11 archivebox_automation.py server --site "Example Site" --port 8001
+- Generate a snapshot link from a specific site instance:
+  python3.11 archivebox_automation.py snapshot_link https://example.com --site "Example Site" --months-ago 2 --server-base http://localhost:8001
 
 ### Dependencies
 
@@ -39,7 +56,7 @@ The following extractors are used by default:
 - wget (if installed)
 - SingleFile (for sites that specify it)
 
-**Note:** The readability extractor is disabled by default due to JSON parsing issues. The tool automatically handles this by removing the `--without-readability` flag (which is not supported by the current version of ArchiveBox) while still ensuring the readability extractor is not used.
+**Note:** The readability, mercury/postlight, and htmltotext extractors are disabled by default to avoid common parsing failures (e.g., JSON errors, "Extractor failed: Mercury was not able to get article text from the URL", and "htmltotext could not find HTML to parse"). The tool automatically removes legacy `--without-readability` and `--without-mercury` CLI flags (not supported in newer ArchiveBox) while setting the appropriate options in ArchiveBox.conf to keep these extractors off.
 
 ### Initial Setup
 
@@ -61,6 +78,10 @@ python3.11 archivebox_automation.py add https://example.com
 # Archive all configured sites
 python3.11 archivebox_automation.py bulk
 
+python3.11 archivebox_automation.py bulk --parallel
+
+python3.11 archivebox_automation.py status
+
 # Run scheduled archiving (with cleanup)
 python3.11 archivebox_automation.py schedule
 
@@ -69,6 +90,12 @@ python3.11 archivebox_automation.py cleanup --days=180 --keep-monthly
 
 # Start web server
 python3.11 archivebox_automation.py server
+
+# Get a link to the snapshot nearest to a specific date (for viewing-only use cases)
+python3.11 archivebox_automation.py snapshot_link https://example.com --months-ago 2 --server-base http://localhost:8001
+# or with explicit date
+python3.11 archivebox_automation.py snapshot_link https://example.com --date 2025-06 --server-base http://localhost:8001
+# Without server-base, you'll get a relative /archive/<timestamp>/ and a local file path fallback
 
 # Create a superuser for the web interface 
 cd /srv/archivebox

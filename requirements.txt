@@ -2,3 +2,4 @@ archivebox>=0.7.0
 click>=8.0.0
 pyyaml>=6.0
 pathlib>=1.0.1
+pytest>=8.4.1
