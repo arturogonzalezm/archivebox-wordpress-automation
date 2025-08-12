@@ -430,12 +430,12 @@ def init(ctx):
     click.echo(f"Initialised ArchiveBox in {d}.")
 
 
-def _ensure_site_instance(ctx, site_name: str) -> str:
+def _ensure_site_instance(ctx, site_name: str, site_slug_override: Optional[str] = None) -> str:
     base = DEFAULT_ARCHIVEBOX_DIR
     # If user specified a custom data-dir, nest site instances under it
     if ctx and ctx.obj and ctx.obj.get('ARCHIVEBOX_DIR'):
         base = ctx.obj['ARCHIVEBOX_DIR']
-    site_slug = _slugify(site_name)
+    site_slug = site_slug_override or _slugify(site_name)
     site_dir = os.path.join(base, site_slug)
     os.makedirs(site_dir, exist_ok=True)
     # Create minimal init if missing (detect by presence of index) and ensure settings
@@ -590,17 +590,25 @@ def bulk(ctx, index_only, parallel, per_site):
             url = site['url']
             name = site.get('name', url)
             depth = site.get('depth', defaults.get('depth', 1))
+            # Determine slug (allow override from config)
+            site_slug = site.get('slug') or _slugify(name)
+            # Build tags, allow extra custom tags from config
             tags = [
                 f"client:{site.get('client', 'unknown')}",
                 f"site:{name}",
+                f"site_slug:{site_slug}",
                 f"snapshot-{datetime.datetime.now().strftime('%Y-%m')}"
             ]
+            extra_tags = site.get('tags') or []
+            for t in extra_tags:
+                if isinstance(t, str) and t:
+                    tags.append(t)
 
             # Optionally switch to per-site instance
             saved_dir = ctx.obj['ARCHIVEBOX_DIR']
             saved_urls = ctx.obj['URLS_FILE']
             if effective_per_site:
-                site_dir = _ensure_site_instance(ctx, name)
+                site_dir = _ensure_site_instance(ctx, name, site_slug)
                 ctx.obj['ARCHIVEBOX_DIR'] = site_dir
                 ctx.obj['URLS_FILE'] = os.path.join(site_dir, 'urls.txt')
                 click.echo(f"[per-site] Using data-dir: {site_dir}")
