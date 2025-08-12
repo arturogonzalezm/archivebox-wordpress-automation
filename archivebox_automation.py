@@ -93,6 +93,7 @@ def _ensure_archivebox_settings(archivebox_dir: str) -> None:
       - Disable Readability extractor to avoid JSON parsing crashes.
       - Disable Media and Archive.org savers by default to avoid frequent failures/timeouts.
       - Leave Screenshot/PDF enabled only if Chromium/Chrome is present.
+      - Disable SingleFile saver when the 'single-file' CLI is not installed.
     The function is idempotent and will create ArchiveBox.conf if missing.
     """
     conf_path = os.path.join(archivebox_dir, 'ArchiveBox.conf')
@@ -107,12 +108,21 @@ def _ensure_archivebox_settings(archivebox_dir: str) -> None:
     ]
     has_chromium = any(os.path.exists(p) and os.access(p, os.X_OK) for p in chromium_paths)
 
+    # Detect SingleFile CLI availability
+    try:
+        import shutil
+        has_singlefile = shutil.which('single-file') is not None
+    except Exception:
+        has_singlefile = False
+
     # Desired settings
     settings = {
         'SAVE_READABILITY': 'False',
         'SAVE_HTMLTOTEXT': 'False',
         'SAVE_MEDIA': 'False',
         'SAVE_ARCHIVE_DOT_ORG': 'False',
+        'SAVE_MERCURY': 'False',  # Disable Mercury/Postlight extractor to avoid failures
+        'SAVE_SINGLEFILE': 'True' if has_singlefile else 'False',
         # We will not explicitly force PDF/SCREENSHOT here; ArchiveBox will handle based on availability.
     }
 
@@ -193,7 +203,8 @@ def _ensure_archivebox_settings(archivebox_dir: str) -> None:
 def _check_dependencies():
     """Check if required dependencies are installed"""
     dependencies = {
-        'wget': 'wget is required for downloading web pages. Install with: brew install wget (macOS) or apt-get install wget (Linux)'
+        'wget': 'wget is required for downloading web pages. Install with: brew install wget (macOS) or apt-get install wget (Linux)',
+        'single-file': "SingleFile CLI is required for the 'singlefile' extractor. Install with: npm i -g single-file-cli",
     }
 
     # Check for Chromium browser (used for screenshot and PDF extractors)
@@ -240,6 +251,10 @@ def _run(ctx, *args, stdin=None, capture_output=False):
         if '--without-readability' in new_args:
             new_args.remove('--without-readability')
             removed_flags.append("--without-readability")
+        if '--without-mercury' in new_args:
+            # Mercury flag is legacy/unsupported; handled via ArchiveBox.conf
+            new_args.remove('--without-mercury')
+            removed_flags.append("--without-mercury")
 
         # Print message about removed flags
         if removed_flags:
@@ -272,6 +287,10 @@ def _run(ctx, *args, stdin=None, capture_output=False):
                     if '--without-pdf' not in new_args:
                         new_args.append('--without-pdf')
                         click.echo(f"[!] Disabled PDF extractor due to missing Chromium/Chrome")
+                elif cmd == 'single-file':
+                    # SingleFile CLI missing; ArchiveBox will skip it automatically.
+                    # Do not pass unsupported '--without-singlefile' flag.
+                    click.echo(f"[!] SingleFile extractor will be skipped because 'single-file' CLI was not found")
             click.echo(f"[*] Continuing with modified command (disabled missing extractors)")
 
         args = tuple(new_args)
@@ -467,14 +486,13 @@ def _create_default_config(config_file):
 @click.option('--depth', default=1, help='Crawl depth for the site')
 @click.option('--tag', multiple=True, help='Tags to add to the snapshot')
 @click.option('--without-wget', is_flag=True, help='Skip wget extractor')
-@click.option('--without-singlefile', is_flag=True, help='Skip singlefile extractor')
 @click.option('--without-dom', is_flag=True, help='Skip dom extractor')
 @click.option('--without-readability', is_flag=True, default=True,
               help='Skip readability extractor (disabled by default due to JSON parsing issues)')
 @click.option('--without-pdf', is_flag=True, help='Skip pdf extractor')
 @click.option('--without-screenshot', is_flag=True, help='Skip screenshot extractor')
 @click.pass_context
-def add(ctx, url, index_only, depth, tag, without_wget, without_singlefile,
+def add(ctx, url, index_only, depth, tag, without_wget,
         without_dom, without_readability, without_pdf, without_screenshot):
     """Add a single URL to ArchiveBox for archiving"""
     args = ['add', url, f'--depth={depth}']
@@ -489,8 +507,6 @@ def add(ctx, url, index_only, depth, tag, without_wget, without_singlefile,
     # Add the --without-* flags if specified
     if without_wget:
         args.append('--without-wget')
-    if without_singlefile:
-        args.append('--without-singlefile')
     if without_dom:
         args.append('--without-dom')
     # Readability extractor is disabled via ArchiveBox.conf in _ensure_archivebox_settings()
