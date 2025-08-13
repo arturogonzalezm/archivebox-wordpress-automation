@@ -1144,3 +1144,7 @@ def server(ctx, port, host, site_name):
 
 if __name__ == '__main__':
     cli()
+
+
+# TODO: Show the clients the snapshot of how the website looked 1,2,3 months ago.
+# TODO: The snapshot has to be per website
